@@ -1,0 +1,446 @@
+\documentclass[11pt,a4paper]{article}
+
+% XeLaTeX中文支持
+\usepackage{xeCJK}
+\setCJKmainfont{PingFang SC}
+
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\geometry{left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm}
+
+\title{多针细胞染料灌注调度问题的数学模型 \\ \large v5 (NSGA-II求解 核心定义)}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{问题描述}
+
+\subsection{系统概述}
+
+在脑组织切片样本上，使用明场显微镜（40x镜头）根据预设地图区域扫描后检测到$N$个神经元细胞。通过图着色算法将所有细胞划分为$M$种不同颜色，确保相邻细胞颜色不同，以便灌注后获得颜色差异最大的神经元图像，提高神经元重建分支的准确性。
+
+系统配备$P$根注射针（$P = M$），各针以特定角度$(\theta_p^{XY}, \theta_p^{Z})$固定于显微镜镜头周围。\textbf{每根针恰好对应一种颜色}，颜色与针的分配关系预先确定。所有针均可到达规划地图的任意位置。
+
+\subsection{状态机模型}
+
+单针细胞灌注由有限状态机驱动，状态划分为两个主要阶段：
+
+\begin{center}
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{阶段} & \textbf{包含状态} & \textbf{特性} \\
+\hline
+Find阶段 & Start, MoveToCell, AutoCalibration, & 独占相机 \\
+（约1分钟） & LocateCell, LowerNeedle, AxialInjection, & 不可中断 \\
+ & Wait(Stage 1-3) & \\
+\hline
+Wait阶段 & Wait(Stage 4), RetreatNeedle, & 可中断 \\
+（约4分钟） & LiftNeedle, END & 可让出控制权 \\
+\hline
+\end{tabular}
+\end{center}
+
+\subsection{核心约束}
+\begin{enumerate}
+    \item \textbf{颜色-针绑定}：每根针恰好处理一种颜色的所有细胞，一一对应关系
+    \item \textbf{相机互斥}：任意时刻最多一根针处于Find阶段（独占相机资源）
+    \item \textbf{碰撞避免}：考虑针身长度的三维空间碰撞检测，针移动受限
+    \item \textbf{并行机制}：一针进入Wait阶段后，其他空闲针可获取相机进入Find阶段
+\end{enumerate}
+
+\subsection{优化目标}
+\begin{enumerate}
+    \item 最小化总完成时间（makespan）$C_{\max}$
+    \item 最小化总移动距离 $D_{\text{total}}$
+    \item 最小化长距离移动次数 $N_{\text{long}}$
+    \item 最大化各针利用率（等价于最小化空闲时间 $\sum_p T_p^{\text{idle}}$）
+\end{enumerate}
+
+%==============================================================================
+\section{符号定义}
+%==============================================================================
+
+\subsection{集合}
+\begin{align}
+    \mathcal{C} &= \{1, 2, \ldots, N\} && \text{所有细胞的集合} \\
+    \mathcal{M} &= \{1, 2, \ldots, M\} && \text{颜色集合} \\
+    \mathcal{C}_m &\subseteq \mathcal{C} && \text{颜色$m$的细胞子集，}\bigcup_{m \in \mathcal{M}} \mathcal{C}_m = \mathcal{C}, \; \mathcal{C}_i \cap \mathcal{C}_j = \emptyset \; (i \neq j) \\
+    \mathcal{P} &= \{1, 2, \ldots, P\} && \text{针的集合，}P = M \\
+    \mathcal{C}_0 &= \{0\} && \text{虚拟起点（针的初始位置）}
+\end{align}
+
+\subsection{几何与时间参数}
+\begin{align}
+    (x_c, y_c, z_c) && \text{细胞$c$的三维坐标，} c \in \mathcal{C} \\
+    (x_p^0, y_p^0, z_p^0) && \text{针$p$的初始位置（待机位置）} \\
+    (\theta_p^{XY}, \theta_p^{Z}) && \text{针$p$的安装角度（水平、垂直）} \\
+    L_p && \text{针$p$的有效长度}
+\end{align}
+
+\subsection{距离与时间参数}
+\begin{align}
+    d_{cc'} &= \sqrt{(x_c-x_{c'})^2 + (y_c-y_{c'})^2 + (z_c-z_{c'})^2} && \text{细胞$c$到$c'$的欧氏距离} \\
+    d_{0c}^p &= \sqrt{(x_p^0-x_c)^2 + (y_p^0-y_c)^2 + (z_p^0-z_c)^2} && \text{针$p$初始位置到细胞$c$的距离} \\
+    t_{cc'} &= d_{cc'} / v && \text{针从细胞$c$移动到$c'$的时间} \\
+    t_{0c}^p &= d_{0c}^p / v && \text{针$p$从初始位置移动到细胞$c$的时间} \\
+    t^{\text{find}} && \text{Find阶段固定耗时（不含移动），$\approx 1$分钟} \\
+    t^{\text{wait}} && \text{Wait阶段耗时，$\approx 4$分钟} \\
+    v && \text{针的移动速度}
+\end{align}
+
+\subsection{碰撞与阈值参数}
+\begin{align}
+    D^{\text{tip}} && \text{针尖安全距离（用于针尖-针尖、针尖-针身碰撞检测）} \\
+    D^{\text{body}} && \text{针身安全距离（用于针身-针身碰撞检测）} \\
+    D^{\text{long}} && \text{长距离移动阈值} \\
+    H && \text{足够大的常数（Big-M）}
+\end{align}
+
+\subsection{针几何模型}
+
+每根针建模为从针尖到针座的有向线段。当针$p$处理细胞$c$时，针尖位于细胞位置$(x_c, y_c, z_c)$，针座位置由针的安装角度和有效长度决定：
+\begin{align}
+    \mathbf{T}_p(c) &= (x_c, y_c, z_c) && \text{针$p$处理细胞$c$时的针尖位置} \\
+    \mathbf{B}_p(c) &= \mathbf{T}_p(c) + L_p \cdot \mathbf{d}_p && \text{针$p$处理细胞$c$时的针座位置}
+\end{align}
+其中$\mathbf{d}_p = (\cos\theta_p^Z \cos\theta_p^{XY}, \cos\theta_p^Z \sin\theta_p^{XY}, \sin\theta_p^Z)$为针$p$的方向向量。
+
+\subsection{预处理参数（输入数据）}
+\begin{align}
+    \pi: \mathcal{P} \rightarrow \mathcal{M} && \text{针到颜色的映射函数（预先确定）} \\
+    \text{color}(c) \in \mathcal{M} && \text{细胞$c$的颜色} \\
+    \mathbb{I}^{\text{long}}_{cc'} &= \begin{cases} 1 & \text{if } d_{cc'} > D^{\text{long}} \\ 0 & \text{otherwise} \end{cases} && \text{长距离移动指示器}
+\end{align}
+
+\subsection{碰撞检测预处理参数}
+
+对于由不同针处理的两个细胞$c \in \mathcal{C}_m$和$c' \in \mathcal{C}_{m'}$（$m \neq m'$），设针$p = p(m)$处理$c$，针$p' = p(m')$处理$c'$。定义以下几何距离：
+
+\textbf{点到线段距离}：点$\mathbf{P}$到线段$\overline{\mathbf{AB}}$的最短距离
+\begin{equation}
+    \text{dist}_{\text{pt-seg}}(\mathbf{P}, \mathbf{A}, \mathbf{B}) = \min_{t \in [0,1]} \|\mathbf{P} - (\mathbf{A} + t(\mathbf{B} - \mathbf{A}))\|
+\end{equation}
+
+\textbf{线段到线段距离}：两线段$\overline{\mathbf{A}_1\mathbf{B}_1}$和$\overline{\mathbf{A}_2\mathbf{B}_2}$的最短距离
+\begin{equation}
+    \text{dist}_{\text{seg-seg}}(\mathbf{A}_1, \mathbf{B}_1, \mathbf{A}_2, \mathbf{B}_2) = \min_{s,t \in [0,1]} \|(\mathbf{A}_1 + s(\mathbf{B}_1 - \mathbf{A}_1)) - (\mathbf{A}_2 + t(\mathbf{B}_2 - \mathbf{A}_2))\|
+\end{equation}
+
+\textbf{碰撞类型指示器}（预计算）：
+\begin{align}
+    d^{\text{tip-tip}}_{cc'} &= \|\mathbf{T}_p(c) - \mathbf{T}_{p'}(c')\| && \text{针尖到针尖距离} \\
+    d^{\text{tip-body}}_{cc'} &= \min\left( \text{dist}_{\text{pt-seg}}(\mathbf{T}_p(c), \mathbf{T}_{p'}(c'), \mathbf{B}_{p'}(c')), \right. && \\
+    & \quad\quad\quad \left. \text{dist}_{\text{pt-seg}}(\mathbf{T}_{p'}(c'), \mathbf{T}_p(c), \mathbf{B}_p(c)) \right) && \text{针尖到针身距离} \\
+    d^{\text{body-body}}_{cc'} &= \text{dist}_{\text{seg-seg}}(\mathbf{T}_p(c), \mathbf{B}_p(c), \mathbf{T}_{p'}(c'), \mathbf{B}_{p'}(c')) && \text{针身到针身距离}
+\end{align}
+
+\textbf{碰撞风险指示器}：
+\begin{align}
+    \mathbb{I}^{\text{tip-tip}}_{cc'} &= \begin{cases} 1 & \text{if } d^{\text{tip-tip}}_{cc'} < D^{\text{tip}} \\ 0 & \text{otherwise} \end{cases} && \text{针尖-针尖碰撞风险} \\
+    \mathbb{I}^{\text{tip-body}}_{cc'} &= \begin{cases} 1 & \text{if } d^{\text{tip-body}}_{cc'} < D^{\text{tip}} \\ 0 & \text{otherwise} \end{cases} && \text{针尖-针身碰撞风险} \\
+    \mathbb{I}^{\text{body-body}}_{cc'} &= \begin{cases} 1 & \text{if } d^{\text{body-body}}_{cc'} < D^{\text{body}} \\ 0 & \text{otherwise} \end{cases} && \text{针身-针身碰撞风险} \\
+    \mathbb{I}^{\text{collide}}_{cc'} &= \max(\mathbb{I}^{\text{tip-tip}}_{cc'}, \mathbb{I}^{\text{tip-body}}_{cc'}, \mathbb{I}^{\text{body-body}}_{cc'}) && \text{存在碰撞风险}
+\end{align}
+
+%==============================================================================
+\section{决策变量}
+%==============================================================================
+
+\subsection{序列决策变量}
+\begin{align}
+    y_{cc'} &\in \{0,1\} && \text{细胞$c$是否\textbf{紧邻}在细胞$c'$之前被处理（同针）} \\
+    && & c, c' \in \mathcal{C}_m \cup \{0\}, \; c \neq c', \; \forall m \in \mathcal{M}
+\end{align}
+
+\textbf{注}：由于针-颜色一一对应，同颜色细胞必由同一针处理，故序列变量仅在同颜色细胞间定义。
+
+\subsection{时间决策变量}
+\begin{align}
+    s_c &\geq 0 && \text{细胞$c$的Find阶段开始时间} \\
+    e_c &\geq 0 && \text{细胞$c$的处理完成时间}
+\end{align}
+
+\subsection{全局调度变量}
+\begin{align}
+    w_{cc'} &\in \{0,1\} && \text{细胞$c$的Find阶段是否在细胞$c'$的Find阶段之前} \\
+    && & c, c' \in \mathcal{C}, \; c \neq c'
+\end{align}
+
+\subsection{碰撞检测辅助变量}
+\begin{align}
+    \gamma_{cc'} &\in \{0,1\} && \text{细胞$c$和$c'$的处理时间窗口是否重叠} \\
+    && & c, c' \in \mathcal{C}, \; \text{color}(c) \neq \text{color}(c')
+\end{align}
+
+\subsection{目标函数变量}
+\begin{align}
+    C_{\max} &\geq 0 && \text{最大完成时间（makespan）} \\
+    D_{\text{total}} &\geq 0 && \text{总移动距离} \\
+    N_{\text{long}} &\in \mathbb{Z}_{\geq 0} && \text{长距离移动次数} \\
+    U_{\min} &\in [0,1] && \text{最小针利用率}
+\end{align}
+
+%==============================================================================
+\section{约束条件}
+%==============================================================================
+
+\subsection{针-颜色绑定约束}
+
+由于针与颜色一一对应（预先确定），令$p(m)$表示处理颜色$m$的针。则颜色$m$的所有细胞$\mathcal{C}_m$均由针$p(m)$处理，无需额外分配决策。
+
+\subsection{序列约束（每种颜色内部）}
+
+对于每种颜色$m \in \mathcal{M}$，其细胞集$\mathcal{C}_m$构成一个旅行商问题(TSP)子结构。
+
+\textbf{流量守恒约束}（每个细胞恰好有一个前驱和一个后继）：
+
+从虚拟起点出发：
+\begin{equation}
+    \sum_{c \in \mathcal{C}_m} y_{0c} = 1 \quad \forall m \in \mathcal{M}
+\end{equation}
+
+每个细胞恰好有一个前驱：
+\begin{equation}
+    \sum_{c' \in \mathcal{C}_m \cup \{0\}, c' \neq c} y_{c'c} = 1 \quad \forall m \in \mathcal{M}, \forall c \in \mathcal{C}_m
+\end{equation}
+
+每个细胞恰好有一个后继（或为最后一个）：
+\begin{equation}
+    \sum_{c' \in \mathcal{C}_m, c' \neq c} y_{cc'} \leq 1 \quad \forall m \in \mathcal{M}, \forall c \in \mathcal{C}_m
+\end{equation}
+
+流量平衡：
+\begin{equation}
+    \sum_{c' \in \mathcal{C}_m \cup \{0\}, c' \neq c} y_{c'c} = \sum_{c' \in \mathcal{C}_m, c' \neq c} y_{cc'} + \mathbb{I}_c^{\text{last}} \quad \forall m \in \mathcal{M}, \forall c \in \mathcal{C}_m
+\end{equation}
+
+其中$\mathbb{I}_c^{\text{last}}$为指示变量，表示$c$是否为该颜色的最后一个处理细胞。
+
+\subsection{时间约束}
+
+\textbf{阶段时间关系}：
+\begin{equation}
+    e_c = s_c + t^{\text{find}} + t^{\text{wait}} \quad \forall c \in \mathcal{C}
+\end{equation}
+
+定义Wait阶段开始时间（用于并行调度分析）：
+\begin{equation}
+    s_c^{\text{wait}} = s_c + t^{\text{find}} \quad \forall c \in \mathcal{C}
+\end{equation}
+
+\textbf{同颜色序列时间约束}：若细胞$c$紧邻在$c'$之前被处理
+\begin{equation}
+    s_{c'} \geq e_c + t_{cc'} - H(1 - y_{cc'}) \quad \forall m \in \mathcal{M}, \forall c, c' \in \mathcal{C}_m, c \neq c'
+\end{equation}
+
+\textbf{首个细胞的开始时间}：从初始位置移动到首个细胞
+\begin{equation}
+    s_c \geq t_{0c}^{p(m)} - H(1 - y_{0c}) \quad \forall m \in \mathcal{M}, \forall c \in \mathcal{C}_m
+\end{equation}
+
+\subsection{Find阶段互斥约束（相机独占）}
+
+任意时刻最多一根针处于Find阶段。对于任意两个细胞$c, c' \in \mathcal{C}$（$c \neq c'$），其Find阶段不能重叠：
+
+\begin{equation}
+    w_{cc'} + w_{c'c} = 1 \quad \forall c, c' \in \mathcal{C}, c < c'
+\end{equation}
+
+\begin{equation}
+    s_{c'} \geq s_c + t^{\text{find}} - H(1 - w_{cc'}) \quad \forall c, c' \in \mathcal{C}, c \neq c'
+\end{equation}
+
+\begin{equation}
+    s_c \geq s_{c'} + t^{\text{find}} - H \cdot w_{cc'} \quad \forall c, c' \in \mathcal{C}, c \neq c'
+\end{equation}
+
+\subsection{碰撞避免约束}
+
+碰撞检测基于针的几何模型，考虑三种碰撞类型：
+\begin{itemize}
+    \item \textbf{针尖-针尖碰撞}：两根针的针尖距离小于$D^{\text{tip}}$
+    \item \textbf{针尖-针身碰撞}：一根针的针尖到另一根针身线段的距离小于$D^{\text{tip}}$
+    \item \textbf{针身-针身碰撞}：两根针身线段之间的距离小于$D^{\text{body}}$
+\end{itemize}
+
+\textbf{时间重叠检测}：对于不同颜色的两个细胞$c$和$c'$（由不同针处理），检测其处理时间窗口$[s_c, e_c]$和$[s_{c'}, e_{c'}]$是否重叠。
+
+引入辅助二元变量$\delta_{cc'} \in \{0,1\}$：
+\begin{align}
+    s_c &\leq e_{c'} + H(1 - \gamma_{cc'}) \\
+    s_{c'} &\leq e_c + H(1 - \gamma_{cc'}) \\
+    s_c &\geq e_{c'} - H \cdot \gamma_{cc'} - H \cdot \delta_{cc'} \\
+    s_{c'} &\geq e_c - H \cdot \gamma_{cc'} - H(1 - \delta_{cc'})
+\end{align}
+\begin{equation}
+    \forall c, c' \in \mathcal{C}: \text{color}(c) \neq \text{color}(c')
+\end{equation}
+
+\textbf{空间碰撞约束}：若两根针处理各自细胞时存在任意类型的碰撞风险，则其处理时间窗口不能重叠：
+\begin{equation}
+    \gamma_{cc'} = 0 \quad \forall c, c' \in \mathcal{C}: \text{color}(c) \neq \text{color}(c') \land \mathbb{I}^{\text{collide}}_{cc'} = 1
+\end{equation}
+
+等价线性化形式：
+\begin{equation}
+    \gamma_{cc'} \leq 1 - \mathbb{I}^{\text{collide}}_{cc'} \quad \forall c, c' \in \mathcal{C}: \text{color}(c) \neq \text{color}(c')
+\end{equation}
+
+\textbf{注}：碰撞检测支持2D和3D两种模式。在2D模式下，忽略Z坐标和垂直角度$\theta_p^Z$；在3D模式下，使用完整的三维几何进行计算。碰撞风险指示器$\mathbb{I}^{\text{collide}}_{cc'}$在调度前预计算。
+
+\subsection{目标函数相关约束}
+
+\textbf{最大完成时间}：
+\begin{equation}
+    C_{\max} \geq e_c \quad \forall c \in \mathcal{C}
+\end{equation}
+
+\textbf{总移动距离}：
+\begin{equation}
+    D_{\text{total}} = \sum_{m \in \mathcal{M}} \left( \sum_{c \in \mathcal{C}_m} d_{0c}^{p(m)} \cdot y_{0c} + \sum_{c, c' \in \mathcal{C}_m, c \neq c'} d_{cc'} \cdot y_{cc'} \right)
+\end{equation}
+
+\textbf{长距离移动次数}：
+\begin{equation}
+    N_{\text{long}} = \sum_{m \in \mathcal{M}} \sum_{c, c' \in \mathcal{C}_m, c \neq c'} \mathbb{I}^{\text{long}}_{cc'} \cdot y_{cc'}
+\end{equation}
+
+\textbf{针利用率}：
+
+针$p(m)$的工作时间：
+\begin{equation}
+    T_m^{\text{work}} = |\mathcal{C}_m| \cdot (t^{\text{find}} + t^{\text{wait}})
+\end{equation}
+
+针$p(m)$的活动时间（从首个细胞开始到最后一个细胞结束）：
+\begin{equation}
+    T_m^{\text{span}} = \max_{c \in \mathcal{C}_m} e_c - \min_{c \in \mathcal{C}_m} s_c
+\end{equation}
+
+线性化处理：引入$S_m = \min_{c \in \mathcal{C}_m} s_c$和$E_m = \max_{c \in \mathcal{C}_m} e_c$
+\begin{align}
+    S_m &\leq s_c \quad \forall c \in \mathcal{C}_m \\
+    E_m &\geq e_c \quad \forall c \in \mathcal{C}_m \\
+    S_m &\geq s_c - H(1 - y_{0c}) \quad \forall c \in \mathcal{C}_m \quad \text{（首个细胞）}
+\end{align}
+
+\textbf{总空闲时间}（线性化目标）：
+\begin{equation}
+    T^{\text{idle}}_{\text{total}} = \sum_{m \in \mathcal{M}} \left( E_m - S_m - T_m^{\text{work}} \right)
+\end{equation}
+
+%==============================================================================
+\section{多目标优化模型}
+%==============================================================================
+
+\subsection{目标函数集}
+
+本问题包含四个优化目标：
+\begin{align}
+    f_1 &= C_{\max} && \text{（最小化）最大完成时间} \\
+    f_2 &= D_{\text{total}} && \text{（最小化）总移动距离} \\
+    f_3 &= N_{\text{long}} && \text{（最小化）长距离移动次数} \\
+    f_4 &= T^{\text{idle}}_{\text{total}} && \text{（最小化）总空闲时间}
+\end{align}
+
+\subsection{Pareto最优}
+
+向量优化形式：
+\begin{equation}
+    \min \quad \mathbf{f} = (f_1, f_2, f_3, f_4)^T \quad \text{s.t. } \mathbf{x} \in \mathcal{X}
+\end{equation}
+
+其中$\mathcal{X}$为可行域。目标是找到Pareto最优解集$\mathcal{P}^*$：
+\begin{equation}
+    \mathcal{P}^* = \{\mathbf{x}^* \in \mathcal{X} : \nexists \mathbf{x} \in \mathcal{X} \text{ s.t. } \mathbf{f}(\mathbf{x}) \preceq \mathbf{f}(\mathbf{x}^*) \land \mathbf{f}(\mathbf{x}) \neq \mathbf{f}(\mathbf{x}^*)\}
+\end{equation}
+
+\textbf{支配关系}：解$\mathbf{x}^1$支配解$\mathbf{x}^2$（记作$\mathbf{x}^1 \prec \mathbf{x}^2$）当且仅当：
+\begin{equation}
+    f_i(\mathbf{x}^1) \leq f_i(\mathbf{x}^2), \; \forall i \in \{1,2,3,4\} \quad \text{且} \quad \exists j: f_j(\mathbf{x}^1) < f_j(\mathbf{x}^2)
+\end{equation}
+
+\textbf{Pareto前沿}：所有Pareto最优解对应的目标向量构成的集合：
+\begin{equation}
+    \mathcal{PF} = \left\{ \mathbf{f}(\mathbf{x}^*) \in \mathbb{R}^4 \; | \; \mathbf{x}^* \text{ 是Pareto最优解} \right\}
+\end{equation}
+
+\newpage
+
+%==============================================================================
+\section{完整数学规划模型}
+%==============================================================================
+
+综合以上分析，多针细胞染料灌注调度问题的完整多目标混合整数规划模型如下：
+
+\subsection{目标函数}
+
+\begin{align}
+    \min \quad & f_1 = C_{\max} && \text{最小化最大完成时间} \\
+    \min \quad & f_2 = \sum_{m \in \mathcal{M}} \left( \sum_{c \in \mathcal{C}_m} d_{0c}^{p(m)} \cdot y_{0c} + \sum_{c, c' \in \mathcal{C}_m, c \neq c'} d_{cc'} \cdot y_{cc'} \right) && \text{最小化总移动距离} \\
+    \min \quad & f_3 = \sum_{m \in \mathcal{M}} \sum_{c, c' \in \mathcal{C}_m, c \neq c'} \mathbb{I}^{\text{long}}_{cc'} \cdot y_{cc'} && \text{最小化长距离移动次数} \\
+    \min \quad & f_4 = \sum_{m \in \mathcal{M}} \left( E_m - S_m - |\mathcal{C}_m| \cdot (t^{\text{find}} + t^{\text{wait}}) \right) && \text{最小化总空闲时间}
+\end{align}
+
+\subsection{约束条件}
+
+\textbf{序列约束}（同颜色细胞构成TSP子结构）：
+\begin{align}
+    & \sum_{c \in \mathcal{C}_m} y_{0c} = 1 && \forall m \in \mathcal{M} \\
+    & \sum_{c' \in \mathcal{C}_m \cup \{0\}, c' \neq c} y_{c'c} = 1 && \forall m \in \mathcal{M}, \forall c \in \mathcal{C}_m \\
+    & \sum_{c' \in \mathcal{C}_m, c' \neq c} y_{cc'} \leq 1 && \forall m \in \mathcal{M}, \forall c \in \mathcal{C}_m
+\end{align}
+
+\textbf{时间约束}：
+\begin{align}
+    & e_c = s_c + t^{\text{find}} + t^{\text{wait}} && \forall c \in \mathcal{C} \\
+    & s_{c'} \geq e_c + t_{cc'} - H(1 - y_{cc'}) && \forall m \in \mathcal{M}, \forall c, c' \in \mathcal{C}_m, c \neq c' \\
+    & s_c \geq t_{0c}^{p(m)} - H(1 - y_{0c}) && \forall m \in \mathcal{M}, \forall c \in \mathcal{C}_m
+\end{align}
+
+\textbf{Find阶段互斥约束}（相机独占）：
+\begin{align}
+    & w_{cc'} + w_{c'c} = 1 && \forall c, c' \in \mathcal{C}, c < c' \\
+    & s_{c'} \geq s_c + t^{\text{find}} - H(1 - w_{cc'}) && \forall c, c' \in \mathcal{C}, c \neq c' \\
+    & s_c \geq s_{c'} + t^{\text{find}} - H \cdot w_{cc'} && \forall c, c' \in \mathcal{C}, c \neq c'
+\end{align}
+
+\textbf{碰撞避免约束}（基于针几何的三种碰撞类型检测）：
+\begin{align}
+    & s_c \leq e_{c'} + H(1 - \gamma_{cc'}) && \forall c, c' \in \mathcal{C}: \text{color}(c) \neq \text{color}(c') \\
+    & s_{c'} \leq e_c + H(1 - \gamma_{cc'}) && \forall c, c' \in \mathcal{C}: \text{color}(c) \neq \text{color}(c') \\
+    & s_c \geq e_{c'} - H \cdot \gamma_{cc'} - H \cdot \delta_{cc'} && \forall c, c' \in \mathcal{C}: \text{color}(c) \neq \text{color}(c') \\
+    & s_{c'} \geq e_c - H \cdot \gamma_{cc'} - H(1 - \delta_{cc'}) && \forall c, c' \in \mathcal{C}: \text{color}(c) \neq \text{color}(c') \\
+    & \gamma_{cc'} \leq 1 - \mathbb{I}^{\text{collide}}_{cc'} && \forall c, c' \in \mathcal{C}: \text{color}(c) \neq \text{color}(c')
+\end{align}
+
+\textbf{目标函数辅助约束}：
+\begin{align}
+    & C_{\max} \geq e_c && \forall c \in \mathcal{C} \\
+    & S_m \leq s_c && \forall m \in \mathcal{M}, \forall c \in \mathcal{C}_m \\
+    & E_m \geq e_c && \forall m \in \mathcal{M}, \forall c \in \mathcal{C}_m \\
+    & S_m \geq s_c - H(1 - y_{0c}) && \forall m \in \mathcal{M}, \forall c \in \mathcal{C}_m
+\end{align}
+
+\textbf{变量约束}：
+\begin{align}
+    & y_{cc'} \in \{0, 1\} && \forall m \in \mathcal{M}, \forall c, c' \in \mathcal{C}_m \cup \{0\}, c \neq c' \\
+    & w_{cc'} \in \{0, 1\} && \forall c, c' \in \mathcal{C}, c \neq c' \\
+    & \gamma_{cc'} \in \{0, 1\} && \forall c, c' \in \mathcal{C}: \text{color}(c) \neq \text{color}(c') \\
+    & \delta_{cc'} \in \{0, 1\} && \forall c, c' \in \mathcal{C}: \text{color}(c) \neq \text{color}(c') \\
+    & s_c, e_c \geq 0 && \forall c \in \mathcal{C} \\
+    & S_m, E_m \geq 0 && \forall m \in \mathcal{M} \\
+    & C_{\max} \geq 0
+\end{align}
+
+\end{document}
